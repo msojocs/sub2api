@@ -25,7 +25,9 @@ func TestPasswordRegistrationSettingsRoundTrip(t *testing.T) {
 		require.Equal(t, enabled, public.PasswordRegistrationEnabled)
 		injected, err := h.settingService.GetPublicSettingsForInjection(context.Background())
 		require.NoError(t, err)
-		require.Equal(t, enabled, injected.(*service.PublicSettingsInjectionPayload).PasswordRegistrationEnabled)
+		injectedPayload, ok := injected.(*service.PublicSettingsInjectionPayload)
+		require.True(t, ok)
+		require.Equal(t, enabled, injectedPayload.PasswordRegistrationEnabled)
 	}
 	rec := doUpdateSettings(t, h, map[string]any{"registration_enabled": true}, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
