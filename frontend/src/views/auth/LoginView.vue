@@ -382,7 +382,7 @@ onMounted(async () => {
 
   try {
     const settings = await getPublicSettings()
-    registrationEnabled.value = settings.registration_enabled === true
+    registrationEnabled.value = settings.registration_enabled === true && settings.password_registration_enabled !== false
     turnstileEnabled.value = settings.turnstile_enabled
     turnstileSiteKey.value = settings.turnstile_site_key || ''
     tencentCaptchaEnabled.value = settings.tencent_captcha_enabled === true

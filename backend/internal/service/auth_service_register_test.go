@@ -1010,3 +1010,17 @@ func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthService_PasswordRegistrationDisabled(t *testing.T) {
+	svc := newAuthService(&userRepoStub{}, map[string]string{
+		SettingKeyRegistrationEnabled:         "true",
+		SettingKeyPasswordRegistrationEnabled: "false",
+	}, nil, nil)
+	_, user, err := svc.RegisterWithVerification(context.Background(), "new@example.com", "Password123!", "123456", "", "", "")
+	require.ErrorIs(t, err, ErrRegDisabled)
+	require.Nil(t, user)
+	require.ErrorIs(t, svc.SendVerifyCode(context.Background(), "new@example.com"), ErrRegDisabled)
+	result, err := svc.SendVerifyCodeAsync(context.Background(), "new@example.com")
+	require.ErrorIs(t, err, ErrRegDisabled)
+	require.Nil(t, result)
+}

@@ -721,6 +721,23 @@ describe("admin SettingsView payment visible method controls", () => {
     adminSettingsFetch.mockResolvedValue(undefined);
   });
 
+  it("loads and saves the password registration switch independently", async () => {
+    getSettings.mockResolvedValue({ ...baseSettingsResponse, password_registration_enabled: false });
+    const wrapper = mountView();
+    await flushPromises();
+    await openSecurityTab(wrapper);
+    const toggle = wrapper.get<HTMLInputElement>('[data-testid="password-registration-toggle"]');
+    expect(toggle.element.checked).toBe(false);
+    await toggle.setValue(true);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      registration_enabled: true,
+      password_registration_enabled: true,
+    }));
+    wrapper.unmount();
+  });
+
   it("loads and saves the open button visibility for each custom menu", async () => {
     const menuItems = [
       { id: "docs", label: "Docs", url: "https://example.com/docs", icon_svg: "", visibility: "user", sort_order: 0 },

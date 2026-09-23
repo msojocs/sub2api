@@ -96,6 +96,17 @@ function mountRegister() {
 }
 
 describe('RegisterView', () => {
+  it('hides password signup while keeping OIDC available when password registration is disabled', async () => {
+    getPublicSettingsMock.mockResolvedValue({ ...publicSettings, password_registration_enabled: false, oidc_oauth_enabled: true })
+    const wrapper = mountRegister()
+    await flushPromises()
+    expect(wrapper.text()).toContain('auth.passwordRegistrationDisabled')
+    expect(wrapper.find('form').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'OidcOAuthSection' }).exists()).toBe(true)
+    expect(registerMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     getPublicSettingsMock.mockReset()
     registerMock.mockReset()

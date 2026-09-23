@@ -32,6 +32,9 @@ func (h *SettingHandler) auditSettingsUpdate(c *gin.Context, before *service.Sys
 
 func diffSettings(before *service.SystemSettings, after *service.SystemSettings, beforeAuthSourceDefaults *service.AuthSourceDefaultSettings, afterAuthSourceDefaults *service.AuthSourceDefaultSettings, req UpdateSettingsRequest) []string {
 	changed := make([]string, 0, 20)
+	if before.PasswordRegistrationEnabled != after.PasswordRegistrationEnabled {
+		changed = append(changed, "password_registration_enabled")
+	}
 	if before.RegistrationEnabled != after.RegistrationEnabled {
 		changed = append(changed, "registration_enabled")
 	}

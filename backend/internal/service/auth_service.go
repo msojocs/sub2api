@@ -162,7 +162,7 @@ func (s *AuthService) Register(ctx context.Context, email, password string) (str
 // RegisterWithVerification 用户注册（支持邮件验证、优惠码、邀请码和邀请返利码），返回token和用户。
 func (s *AuthService) RegisterWithVerification(ctx context.Context, email, password, verifyCode, promoCode, invitationCode, affiliateCode string) (string, *User, error) {
 	// 检查是否开放注册（默认关闭：settingService 未配置时不允许注册）
-	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) {
+	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) || !s.settingService.IsPasswordRegistrationEnabled(ctx) {
 		return "", nil, ErrRegDisabled
 	}
 
@@ -307,7 +307,7 @@ type SendVerifyCodeResult struct {
 // SendVerifyCode 发送邮箱验证码（同步方式）
 func (s *AuthService) SendVerifyCode(ctx context.Context, email string, locale ...string) error {
 	// 检查是否开放注册（默认关闭）
-	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) {
+	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) || !s.settingService.IsPasswordRegistrationEnabled(ctx) {
 		return ErrRegDisabled
 	}
 
@@ -346,7 +346,7 @@ func (s *AuthService) SendVerifyCodeAsync(ctx context.Context, email string, loc
 	logger.LegacyPrintf("service.auth", "[Auth] SendVerifyCodeAsync called for email: %s", email)
 
 	// 检查是否开放注册（默认关闭）
-	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) {
+	if s.settingService == nil || !s.settingService.IsRegistrationEnabled(ctx) || !s.settingService.IsPasswordRegistrationEnabled(ctx) {
 		logger.LegacyPrintf("service.auth", "%s", "[Auth] Registration is disabled")
 		return nil, ErrRegDisabled
 	}

@@ -234,6 +234,7 @@ export default {
     rememberMe: 'Remember me',
     dontHaveAccount: "Don't have an account?",
     alreadyHaveAccount: 'Already have an account?',
+    passwordRegistrationDisabled: 'Password registration is disabled. Please use third-party sign-in or contact the administrator.',
     registrationDisabled: 'Registration is currently disabled. Please contact the administrator.',
     emailLabel: 'Email',
     emailPlaceholder: 'Enter your email',

@@ -266,8 +266,8 @@ func TestOIDCOAuthCallbackAllowsOptionalPKCEAndIDTokenValidation(t *testing.T) {
 	handler.OIDCOAuthCallback(c)
 
 	require.Equal(t, http.StatusFound, recorder.Code)
-	require.Equal(t, "/auth/oidc/callback", recorder.Header().Get("Location"))
-	require.NotNil(t, findCookie(recorder.Result().Cookies(), oauthPendingSessionCookieName))
+	require.NotEmpty(t, parseOAuthRedirectFragment(t, recorder.Header().Get("Location")).Get("access_token"))
+	requireCookieCleared(t, recorder, oauthPendingSessionCookieName)
 }
 
 func TestOIDCOAuthCallbackCreatesLoginPendingSessionForExistingIdentityUser(t *testing.T) {
@@ -447,11 +447,11 @@ func TestOIDCOAuthCallbackCreatesBindPendingSessionForCompatEmailUser(t *testing
 	completion, ok := session.LocalFlowState[oauthCompletionResponseKey].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "/dashboard", completion["redirect"])
-	require.Equal(t, oauthPendingChoiceStep, completion["step"])
+	require.Equal(t, "bind_login_required", completion["step"])
 	require.Equal(t, existingUser.Email, completion["email"])
 	require.Equal(t, existingUser.Email, completion["existing_account_email"])
 	require.Equal(t, true, completion["existing_account_bindable"])
-	require.Equal(t, "compat_email_match", completion["choice_reason"])
+	require.Equal(t, false, completion["create_account_allowed"])
 	_, hasAccessToken := completion["access_token"]
 	require.False(t, hasAccessToken)
 }
@@ -503,7 +503,7 @@ func TestOIDCOAuthCallbackAllowsCompatEmailBindWhenUpstreamEmailIsUnverified(t *
 	require.Zero(t, count)
 }
 
-func TestOIDCOAuthCallbackCreatesChoicePendingSessionWhenSignupRequiresInvite(t *testing.T) {
+func TestOIDCOAuthCallbackRequestsInvitationWithoutAccountChoice(t *testing.T) {
 	cfg, cleanup := newOIDCTestProvider(t, oidcProviderFixture{
 		Subject:           "oidc-subject-invite",
 		PreferredUsername: "oidc_invite",
@@ -546,9 +546,10 @@ func TestOIDCOAuthCallbackCreatesChoicePendingSessionWhenSignupRequiresInvite(t 
 
 	completion, ok := session.LocalFlowState[oauthCompletionResponseKey].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, oauthPendingChoiceStep, completion["step"])
+	require.Equal(t, "invitation_required", completion["error"])
+	require.Nil(t, completion["step"])
 	require.Equal(t, "/dashboard", completion["redirect"])
-	require.Equal(t, "third_party_signup", completion["choice_reason"])
+	require.Equal(t, true, session.UpstreamIdentityClaims["oidc_auto_registration"])
 }
 
 func TestOIDCOAuthCallbackCreatesBindPendingSessionForCurrentUser(t *testing.T) {
@@ -927,7 +928,7 @@ func TestCompleteOIDCOAuthRegistrationRejectsIdentityOwnershipConflictBeforeUser
 	require.Nil(t, storedSession.ConsumedAt)
 }
 
-func TestTryOIDCVerifiedEmailFastPathCreatesUserAndIdentity(t *testing.T) {
+func TestOIDCAutoLoginCreatesUserAndIdentity(t *testing.T) {
 	handler, client := newOAuthPendingFlowTestHandler(t, false)
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -941,7 +942,7 @@ func TestTryOIDCVerifiedEmailFastPathCreatesUserAndIdentity(t *testing.T) {
 		ProviderKey:     "https://issuer.example.com",
 		ProviderSubject: "fast-path-subject",
 	}
-	completed := handler.tryOIDCVerifiedEmailFastPath(
+	handler.completeOIDCAutoLogin(
 		c,
 		"/auth/oidc/callback",
 		"/dashboard",
@@ -952,8 +953,8 @@ func TestTryOIDCVerifiedEmailFastPathCreatesUserAndIdentity(t *testing.T) {
 			"suggested_display_name": "Fast Path",
 			"suggested_avatar_url":   "",
 		},
+		true,
 	)
-	require.True(t, completed)
 	require.Equal(t, http.StatusFound, recorder.Code)
 
 	location := recorder.Header().Get("Location")
@@ -1036,7 +1037,7 @@ func TestOIDCOAuthCallbackVerifiedEmailFastPathIssuesTokenWithoutPendingSession(
 	require.Equal(t, "oidc-fast-callback@example.com", identity.Metadata["email"])
 	require.Equal(t, true, identity.Metadata["email_verified"])
 	require.Equal(t, "OIDC Fast Callback", identity.Metadata["suggested_display_name"])
-	require.NotEqual(t, identity.Metadata["email"], identity.Metadata["synthetic_email"])
+	require.Equal(t, oidcSyntheticEmailFromIdentityKey(oidcIdentityKey(cfg.IssuerURL, "oidc-fast-callback-subject")), identity.Metadata["synthetic_email"])
 
 	pendingCount, err := client.PendingAuthSession.Query().Count(ctx)
 	require.NoError(t, err)
@@ -1090,7 +1091,7 @@ func TestOIDCOAuthCallbackVerifiedEmailFastPathBackendModeBlocksBeforeUserCreati
 	require.Zero(t, pendingCount)
 }
 
-func TestTryOIDCVerifiedEmailFastPathSkippedWhenInvitationCodeRequired(t *testing.T) {
+func TestOIDCAutoLoginRequestsInvitationWhenRequired(t *testing.T) {
 	handler, client := newOAuthPendingFlowTestHandler(t, true)
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -1098,12 +1099,13 @@ func TestTryOIDCVerifiedEmailFastPathSkippedWhenInvitationCodeRequired(t *testin
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/oidc/callback", nil)
 
+	c.Request.AddCookie(encodedCookie(oauthPendingBrowserCookieName, "invite-browser"))
 	identity := service.PendingAuthIdentityKey{
 		ProviderType:    "oidc",
 		ProviderKey:     "https://issuer.example.com",
 		ProviderSubject: "fast-path-skipped-invitation",
 	}
-	completed := handler.tryOIDCVerifiedEmailFastPath(
+	handler.completeOIDCAutoLogin(
 		c,
 		"/auth/oidc/callback",
 		"/dashboard",
@@ -1111,16 +1113,18 @@ func TestTryOIDCVerifiedEmailFastPathSkippedWhenInvitationCodeRequired(t *testin
 		"invite-only@example.com",
 		"invite_only_user",
 		map[string]any{},
+		true,
 	)
-	require.False(t, completed)
-	require.NotEqual(t, http.StatusFound, recorder.Code)
+	require.Equal(t, http.StatusFound, recorder.Code)
+	require.Equal(t, "/auth/oidc/callback", recorder.Header().Get("Location"))
+	require.NotNil(t, findCookie(recorder.Result().Cookies(), oauthPendingSessionCookieName))
 
 	userCount, err := client.User.Query().Where(dbuser.EmailEQ("invite-only@example.com")).Count(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, userCount)
 }
 
-func TestTryOIDCVerifiedEmailFastPathSkippedWhenForceEmailEnabled(t *testing.T) {
+func TestOIDCAutoLoginAcceptsVerifiedEmailWhenForceEmailEnabled(t *testing.T) {
 	handler, client := newOAuthPendingFlowTestHandlerWithDependencies(t, oauthPendingFlowTestHandlerOptions{
 		settingValues: map[string]string{
 			service.SettingKeyForceEmailOnThirdPartySignup: "true",
@@ -1137,7 +1141,7 @@ func TestTryOIDCVerifiedEmailFastPathSkippedWhenForceEmailEnabled(t *testing.T) 
 		ProviderKey:     "https://issuer.example.com",
 		ProviderSubject: "fast-path-skipped-force-email",
 	}
-	completed := handler.tryOIDCVerifiedEmailFastPath(
+	handler.completeOIDCAutoLogin(
 		c,
 		"/auth/oidc/callback",
 		"/dashboard",
@@ -1145,12 +1149,13 @@ func TestTryOIDCVerifiedEmailFastPathSkippedWhenForceEmailEnabled(t *testing.T) 
 		"force-email@example.com",
 		"force_email_user",
 		map[string]any{},
+		true,
 	)
-	require.False(t, completed)
 
 	userCount, err := client.User.Query().Where(dbuser.EmailEQ("force-email@example.com")).Count(context.Background())
 	require.NoError(t, err)
-	require.Zero(t, userCount)
+	require.Equal(t, 1, userCount)
+	require.NotEmpty(t, parseOAuthRedirectFragment(t, recorder.Header().Get("Location")).Get("access_token"))
 }
 
 type oidcProviderFixture struct {
@@ -1307,4 +1312,161 @@ func newOIDCTestProvider(t *testing.T, fixture oidcProviderFixture) (config.OIDC
 		RequireEmailVerified: false,
 	}
 	return cfg, server.Close
+}
+
+func TestOIDCOAuthAutomaticSignupWithPasswordRegistrationDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		email     string
+		verified  bool
+		settings  map[string]string
+		wantError string
+	}{
+		{name: "verified email", email: "auto@example.com", verified: true},
+		{name: "missing email"},
+		{name: "unverified email", email: "unverified@example.com"},
+		{name: "force email with verified claim", email: "forced@example.com", verified: true, settings: map[string]string{service.SettingKeyForceEmailOnThirdPartySignup: "true", service.SettingKeyEmailVerifyEnabled: "true"}},
+		{name: "registration closed", email: "closed@example.com", verified: true, settings: map[string]string{service.SettingKeyRegistrationEnabled: "false"}, wantError: "login_failed"},
+		{name: "registration closed without email", settings: map[string]string{service.SettingKeyRegistrationEnabled: "false"}, wantError: "login_failed"},
+		{name: "verified email required", settings: map[string]string{service.SettingKeyForceEmailOnThirdPartySignup: "true"}, wantError: "email_not_verified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const subject = "auto-signup-subject"
+			cfg, cleanup := newOIDCTestProvider(t, oidcProviderFixture{Subject: subject, PreferredUsername: "auto_user", Email: tc.email, EmailVerified: tc.verified})
+			defer cleanup()
+			cfg.RequireEmailVerified = false
+			settings := map[string]string{service.SettingKeyPasswordRegistrationEnabled: "false"}
+			for key, value := range tc.settings {
+				settings[key] = value
+			}
+			h, client := newOIDCOAuthHandlerAndClientWithSettings(t, false, cfg, settings)
+			defer client.Close()
+			callback := func() *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/oidc/callback?code=code&state=auto-state", nil)
+				for _, cookie := range []*http.Cookie{
+					encodedCookie(oidcOAuthStateCookieName, "auto-state"),
+					encodedCookie(oidcOAuthVerifierCookie, "auto-verifier"),
+					encodedCookie(oidcOAuthNonceCookie, "nonce-"+subject),
+					encodedCookie(oauthPendingBrowserCookieName, "auto-browser"),
+				} {
+					c.Request.AddCookie(cookie)
+				}
+				h.OIDCOAuthCallback(c)
+				require.Equal(t, http.StatusFound, rec.Code)
+				return rec
+			}
+			rec := callback()
+			values := parseOAuthRedirectFragment(t, rec.Header().Get("Location"))
+			ctx := context.Background()
+			if tc.wantError != "" {
+				require.Equal(t, tc.wantError, values.Get("error"))
+				require.Empty(t, values.Get("access_token"))
+				require.Zero(t, client.User.Query().CountX(ctx))
+				require.Zero(t, client.PendingAuthSession.Query().CountX(ctx))
+				return
+			}
+			require.NotEmpty(t, values.Get("access_token"), rec.Header().Get("Location"))
+			require.NotEmpty(t, values.Get("refresh_token"))
+			require.Zero(t, client.PendingAuthSession.Query().CountX(ctx))
+			created := client.User.Query().OnlyX(ctx)
+			require.Equal(t, "oidc", created.SignupSource)
+			if tc.verified {
+				require.Equal(t, tc.email, created.Email)
+			} else {
+				require.Equal(t, oidcSyntheticEmailFromIdentityKey(oidcIdentityKey(cfg.IssuerURL, subject)), created.Email)
+			}
+			identity := client.AuthIdentity.Query().Where(authidentity.ProviderTypeEQ("oidc")).OnlyX(ctx)
+			require.Equal(t, created.ID, identity.UserID)
+			require.Equal(t, subject, identity.ProviderSubject)
+			// The next login resolves the existing identity and completes without a chooser.
+			rec = callback()
+			cookie := findCookie(rec.Result().Cookies(), oauthPendingSessionCookieName)
+			require.NotNil(t, cookie)
+			exchange := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(exchange)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/pending/exchange", strings.NewReader(`{}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Request.AddCookie(cookie)
+			c.Request.AddCookie(encodedCookie(oauthPendingBrowserCookieName, "auto-browser"))
+			h.ExchangePendingOAuthCompletion(c)
+			require.Equal(t, http.StatusOK, exchange.Code, exchange.Body.String())
+			require.Contains(t, exchange.Body.String(), "access_token")
+			require.NotContains(t, exchange.Body.String(), oauthPendingChoiceStep)
+			require.Equal(t, 1, client.User.Query().CountX(ctx))
+		})
+	}
+}
+
+func TestOIDCAutomaticSignupInvitationCompletion(t *testing.T) {
+	for _, verified := range []bool{true, false} {
+		t.Run(boolSettingValue(verified), func(t *testing.T) {
+			cfg, cleanup := newOIDCTestProvider(t, oidcProviderFixture{Subject: "invite-auto", PreferredUsername: "invite_auto", Email: "invite-auto@example.com", EmailVerified: verified})
+			defer cleanup()
+			cfg.RequireEmailVerified = false
+			h, client := newOIDCOAuthHandlerAndClientWithSettings(t, true, cfg, map[string]string{
+				service.SettingKeyPasswordRegistrationEnabled: "false",
+				service.SettingKeyEmailVerifyEnabled:          "true",
+			})
+			defer client.Close()
+			ctx := context.Background()
+			invitation := client.RedeemCode.Create().SetCode("OIDC-INVITE").SetType(service.RedeemTypeInvitation).SetStatus(service.StatusUnused).SaveX(ctx)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/oidc/callback?code=code&state=invite-state", nil)
+			for _, cookie := range []*http.Cookie{
+				encodedCookie(oidcOAuthStateCookieName, "invite-state"),
+				encodedCookie(oidcOAuthVerifierCookie, "invite-verifier"),
+				encodedCookie(oidcOAuthNonceCookie, "nonce-invite-auto"),
+				encodedCookie(oauthPendingBrowserCookieName, "invite-browser"),
+			} {
+				c.Request.AddCookie(cookie)
+			}
+			h.OIDCOAuthCallback(c)
+			require.Equal(t, "/auth/oidc/callback", rec.Header().Get("Location"))
+			sessionCookie := findCookie(rec.Result().Cookies(), oauthPendingSessionCookieName)
+			require.NotNil(t, sessionCookie)
+			require.Zero(t, client.User.Query().CountX(ctx))
+			// Invalid invitations never create a user; the same browser can retry.
+			for _, code := range []string{"invalid", "OIDC-INVITE"} {
+				completed := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(completed)
+				c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/oidc/complete-registration", strings.NewReader(`{"invitation_code":"`+code+`"}`))
+				c.Request.Header.Set("Content-Type", "application/json")
+				c.Request.AddCookie(sessionCookie)
+				c.Request.AddCookie(encodedCookie(oauthPendingBrowserCookieName, "invite-browser"))
+				h.CompleteOIDCOAuthRegistration(c)
+				if code == "invalid" {
+					require.NotEqual(t, http.StatusOK, completed.Code)
+					require.Zero(t, client.User.Query().CountX(ctx))
+					continue
+				}
+				require.Equal(t, http.StatusOK, completed.Code, completed.Body.String())
+				require.Contains(t, completed.Body.String(), "access_token")
+				require.NotContains(t, completed.Body.String(), oauthPendingChoiceStep)
+			}
+			user := client.User.Query().OnlyX(ctx)
+			identity := client.AuthIdentity.Query().Where(authidentity.ProviderTypeEQ("oidc")).OnlyX(ctx)
+			require.Equal(t, user.ID, identity.UserID)
+			require.Equal(t, service.StatusUsed, client.RedeemCode.GetX(ctx, invitation.ID).Status)
+			require.NotNil(t, client.PendingAuthSession.Query().OnlyX(ctx).ConsumedAt)
+		})
+	}
+}
+
+func TestOIDCAutoRegistrationDoesNotBindAnExistingEmailAccount(t *testing.T) {
+	h, client := newOAuthPendingFlowTestHandler(t, false)
+	defer client.Close()
+	ctx := context.Background()
+	existing := client.User.Create().SetEmail("existing@example.com").SetPasswordHash("hash").SetRole(service.RoleUser).SetStatus(service.StatusActive).SaveX(ctx)
+	tokens, user, err := h.authService.LoginOrRegisterOIDCWithSignupCodes(ctx, service.EmailOAuthIdentityInput{
+		ProviderType: "oidc", ProviderKey: "https://issuer.example.com", ProviderSubject: "unbound-subject",
+		Email: existing.Email, EmailVerified: true, Username: "upstream_user",
+	}, "", "", "")
+	require.ErrorIs(t, err, service.ErrEmailExists)
+	require.Nil(t, tokens)
+	require.Nil(t, user)
+	require.Zero(t, client.AuthIdentity.Query().Where(authidentity.ProviderTypeEQ("oidc")).CountX(ctx))
+	require.Equal(t, 1, client.User.Query().CountX(ctx))
 }
