@@ -1340,7 +1340,7 @@ func TestOIDCOAuthAutomaticSignupWithPasswordRegistrationDisabled(t *testing.T) 
 				settings[key] = value
 			}
 			h, client := newOIDCOAuthHandlerAndClientWithSettings(t, false, cfg, settings)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			callback := func() *httptest.ResponseRecorder {
 				rec := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(rec)
@@ -1409,7 +1409,7 @@ func TestOIDCAutomaticSignupInvitationCompletion(t *testing.T) {
 				service.SettingKeyPasswordRegistrationEnabled: "false",
 				service.SettingKeyEmailVerifyEnabled:          "true",
 			})
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			ctx := context.Background()
 			invitation := client.RedeemCode.Create().SetCode("OIDC-INVITE").SetType(service.RedeemTypeInvitation).SetStatus(service.StatusUnused).SaveX(ctx)
 			rec := httptest.NewRecorder()
@@ -1457,7 +1457,7 @@ func TestOIDCAutomaticSignupInvitationCompletion(t *testing.T) {
 
 func TestOIDCAutoRegistrationDoesNotBindAnExistingEmailAccount(t *testing.T) {
 	h, client := newOAuthPendingFlowTestHandler(t, false)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	ctx := context.Background()
 	existing := client.User.Create().SetEmail("existing@example.com").SetPasswordHash("hash").SetRole(service.RoleUser).SetStatus(service.StatusActive).SaveX(ctx)
 	tokens, user, err := h.authService.LoginOrRegisterOIDCWithSignupCodes(ctx, service.EmailOAuthIdentityInput{
