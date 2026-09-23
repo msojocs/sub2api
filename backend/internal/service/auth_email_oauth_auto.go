@@ -101,6 +101,11 @@ func (s *AuthService) loginOrRegisterVerifiedEmailOAuth(
 	created := false
 	if user == nil {
 		user, err = s.userRepo.GetByEmail(ctx, email)
+		if err == nil && providerType == "oidc" {
+			// OIDC requires explicit binding to existing local accounts. Recheck here
+			// because a password account may appear while an invitation is pending.
+			return nil, nil, ErrEmailExists
+		}
 		if err != nil {
 			if errors.Is(err, ErrUserNotFound) {
 				user, err = s.createEmailOAuthUser(ctx, email, input.Username, providerType, invitationCode, affiliateCode)
@@ -192,6 +197,9 @@ func (s *AuthService) createEmailOAuthUser(ctx context.Context, email, username,
 	}
 	if err := s.userRepo.Create(ctx, user); err != nil {
 		if errors.Is(err, ErrEmailExists) {
+			if providerType == "oidc" {
+				return nil, ErrEmailExists
+			}
 			existing, loadErr := s.userRepo.GetByEmail(ctx, email)
 			if loadErr != nil {
 				return nil, ErrServiceUnavailable

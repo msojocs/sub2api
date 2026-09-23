@@ -234,6 +234,7 @@ export default {
     rememberMe: '记住我',
     dontHaveAccount: '还没有账户？',
     alreadyHaveAccount: '已有账户？',
+    passwordRegistrationDisabled: '密码注册已关闭，请使用第三方登录或联系管理员。',
     registrationDisabled: '注册功能暂时关闭，请联系管理员。',
     emailLabel: '邮箱',
     emailPlaceholder: '请输入邮箱',

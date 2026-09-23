@@ -151,6 +151,8 @@ export default {
         description: 'Control user registration and verification',
         enableRegistration: 'Enable Registration',
         enableRegistrationHint: 'Allow new users to register',
+        passwordRegistration: 'Allow password registration',
+        passwordRegistrationHint: 'Allow new accounts using email and password. When disabled, third-party sign-in can still create accounts if registration is open.',
         emailVerification: 'Email Verification',
         emailVerificationHint: 'Require email verification for new registrations',
         emailSuffixWhitelist: 'Email Domain Whitelist',

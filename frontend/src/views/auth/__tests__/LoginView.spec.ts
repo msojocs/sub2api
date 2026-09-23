@@ -115,4 +115,14 @@ describe('LoginView registration entry', () => {
 
     expect(wrapper.text()).not.toContain('auth.signUp')
   })
+  it('hides the signup link when only password registration is disabled', async () => {
+    getPublicSettingsMock.mockResolvedValue({ ...publicSettings, password_registration_enabled: false, oidc_oauth_enabled: true })
+    const wrapper = mountLogin()
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('auth.signUp')
+    expect(wrapper.findComponent({ name: 'OidcOAuthSection' }).exists()).toBe(true)
+    expect(wrapper.find('input[type="password"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
 })
