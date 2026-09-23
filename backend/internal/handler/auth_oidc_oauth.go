@@ -459,60 +459,41 @@ func (h *AuthHandler) OIDCOAuthCallback(c *gin.Context) {
 		}
 	}
 
-	// 快捷路径：当上游返回已验证邮箱、部署不要求额外确认且本地没有同邮箱账号时，
-	// 直接信任上游身份完成注册/登录，避免展示 choice 页。
-	if compatEmailUser == nil &&
-		strings.TrimSpace(compatEmail) != "" &&
-		emailVerified != nil && *emailVerified {
-		if handled := h.tryOIDCVerifiedEmailFastPath(
-			c,
-			frontendCallback,
-			redirectTo,
-			identityRef,
-			compatEmail,
-			username,
-			upstreamClaims,
-		); handled {
-			return
-		}
-	}
-
-	if h.isForceEmailOnThirdPartySignup(c.Request.Context()) {
-		if err := h.createOIDCOAuthChoicePendingSession(
-			c,
-			identityRef,
-			email,
-			email,
-			redirectTo,
-			browserSessionKey,
-			upstreamClaims,
-			compatEmail,
-			compatEmailUser,
-			true,
-		); err != nil {
-			redirectOAuthError(c, frontendCallback, "session_error", "failed to continue oauth login", "")
+	if compatEmailUser != nil {
+		// Matching an email alone does not prove ownership of the existing account.
+		if err := h.createOAuthPendingSession(c, oauthPendingSessionPayload{
+			Intent:                 oauthIntentLogin,
+			Identity:               identityRef,
+			TargetUserID:           &compatEmailUser.ID,
+			ResolvedEmail:          compatEmailUser.Email,
+			RedirectTo:             redirectTo,
+			BrowserSessionKey:      browserSessionKey,
+			UpstreamIdentityClaims: upstreamClaims,
+			CompletionResponse: map[string]any{
+				"step":                      "bind_login_required",
+				"redirect":                  redirectTo,
+				"email":                     compatEmailUser.Email,
+				"existing_account_email":    compatEmailUser.Email,
+				"existing_account_bindable": true,
+				"create_account_allowed":    false,
+			},
+		}); err != nil {
+			redirectOAuthError(c, frontendCallback, "session_error", infraerrors.Reason(err), infraerrors.Message(err))
 			return
 		}
 		redirectToFrontendCallback(c, frontendCallback)
 		return
 	}
 
-	if err := h.createOIDCOAuthChoicePendingSession(
-		c,
-		identityRef,
-		email,
-		email,
-		redirectTo,
-		browserSessionKey,
-		upstreamClaims,
-		compatEmail,
-		compatEmailUser,
-		h.isForceEmailOnThirdPartySignup(c.Request.Context()),
-	); err != nil {
-		redirectOAuthError(c, frontendCallback, "session_error", "failed to continue oauth login", "")
+	verifiedEmail := strings.TrimSpace(compatEmail) != "" && emailVerified != nil && *emailVerified
+	if h.isForceEmailOnThirdPartySignup(c.Request.Context()) && !verifiedEmail {
+		redirectOAuthError(c, frontendCallback, "email_not_verified", "a verified email is required for signup", "")
 		return
 	}
-	redirectToFrontendCallback(c, frontendCallback)
+	if verifiedEmail {
+		email = strings.ToLower(strings.TrimSpace(compatEmail))
+	}
+	h.completeOIDCAutoLogin(c, frontendCallback, redirectTo, identityRef, email, username, upstreamClaims, verifiedEmail)
 }
 
 func (h *AuthHandler) findOIDCCompatEmailUser(ctx context.Context, email string) (*dbent.User, error) {
@@ -538,70 +519,6 @@ func (h *AuthHandler) findOIDCCompatEmailUser(ctx context.Context, email string)
 		return nil, infraerrors.InternalServer("COMPAT_EMAIL_LOOKUP_FAILED", "failed to look up compat email user").WithCause(err)
 	}
 	return userEntity, nil
-}
-
-func (h *AuthHandler) createOIDCOAuthChoicePendingSession(
-	c *gin.Context,
-	identity service.PendingAuthIdentityKey,
-	suggestedEmail string,
-	resolvedEmail string,
-	redirectTo string,
-	browserSessionKey string,
-	upstreamClaims map[string]any,
-	compatEmail string,
-	compatEmailUser *dbent.User,
-	forceEmailOnSignup bool,
-) error {
-	suggestionEmail := strings.TrimSpace(suggestedEmail)
-	canonicalEmail := strings.TrimSpace(resolvedEmail)
-	if suggestionEmail == "" {
-		suggestionEmail = canonicalEmail
-	}
-
-	completionResponse := map[string]any{
-		"step":                      oauthPendingChoiceStep,
-		"adoption_required":         true,
-		"redirect":                  strings.TrimSpace(redirectTo),
-		"email":                     suggestionEmail,
-		"resolved_email":            canonicalEmail,
-		"existing_account_email":    "",
-		"existing_account_bindable": false,
-		"create_account_allowed":    true,
-		"force_email_on_signup":     forceEmailOnSignup,
-		"choice_reason":             "third_party_signup",
-	}
-	if strings.TrimSpace(compatEmail) != "" {
-		completionResponse["compat_email"] = strings.TrimSpace(compatEmail)
-	}
-	if compatEmailUser != nil {
-		completionResponse["email"] = strings.TrimSpace(compatEmailUser.Email)
-		completionResponse["existing_account_email"] = strings.TrimSpace(compatEmailUser.Email)
-		completionResponse["existing_account_bindable"] = true
-		completionResponse["choice_reason"] = "compat_email_match"
-	}
-	if forceEmailOnSignup && compatEmailUser == nil {
-		completionResponse["choice_reason"] = "force_email_on_signup"
-	}
-
-	resolvedChoiceEmail := suggestionEmail
-	if compatEmailUser != nil {
-		resolvedChoiceEmail = strings.TrimSpace(compatEmailUser.Email)
-	}
-	var targetUserID *int64
-	if compatEmailUser != nil && compatEmailUser.ID > 0 {
-		targetUserID = &compatEmailUser.ID
-	}
-
-	return h.createOAuthPendingSession(c, oauthPendingSessionPayload{
-		Intent:                 oauthIntentLogin,
-		Identity:               identity,
-		TargetUserID:           targetUserID,
-		ResolvedEmail:          resolvedChoiceEmail,
-		RedirectTo:             redirectTo,
-		BrowserSessionKey:      browserSessionKey,
-		UpstreamIdentityClaims: upstreamClaims,
-		CompletionResponse:     completionResponse,
-	})
 }
 
 type completeOIDCOAuthRequest struct {
@@ -652,15 +569,19 @@ func (h *AuthHandler) CompleteOIDCOAuthRegistration(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	if updatedSession, handled, err := h.legacyCompleteRegistrationSessionStatus(c, session); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	} else if handled {
-		c.JSON(http.StatusOK, buildPendingOAuthSessionStatusPayload(updatedSession))
-		return
-	} else {
-		session = updatedSession
+	autoRegistration, _ := session.UpstreamIdentityClaims["oidc_auto_registration"].(bool)
+	if !autoRegistration {
+		if updatedSession, handled, err := h.legacyCompleteRegistrationSessionStatus(c, session); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		} else if handled {
+			c.JSON(http.StatusOK, buildPendingOAuthSessionStatusPayload(updatedSession))
+			return
+		} else {
+			session = updatedSession
+		}
 	}
+
 	if err := h.ensureBackendModeAllowsNewUserLogin(c.Request.Context()); err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -690,15 +611,30 @@ func (h *AuthHandler) CompleteOIDCOAuthRegistration(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	tokenPair, user, err := h.authService.LoginOrRegisterOAuthWithTokenPairAndPromoCode(
-		c.Request.Context(),
-		email,
-		username,
-		req.InvitationCode,
-		req.AffCode,
-		pendingOAuthPromoCode(session),
-		"oidc",
-	)
+	var tokenPair *service.TokenPair
+	var user *service.User
+	if autoRegistration {
+		if session.ProviderType != "oidc" {
+			response.ErrorFrom(c, infraerrors.BadRequest("PENDING_AUTH_SESSION_INVALID", "invalid oidc registration context"))
+			return
+		}
+		verified, _ := session.UpstreamIdentityClaims["email_verified"].(bool)
+		tokenPair, user, err = h.authService.LoginOrRegisterOIDCWithSignupCodes(c.Request.Context(), service.EmailOAuthIdentityInput{
+			ProviderType: "oidc", ProviderKey: session.ProviderKey, ProviderSubject: session.ProviderSubject,
+			Email: email, EmailVerified: verified && !strings.HasSuffix(email, service.OIDCConnectSyntheticEmailDomain),
+			Username: username, UpstreamMetadata: session.UpstreamIdentityClaims,
+		}, req.InvitationCode, req.AffCode, pendingOAuthPromoCode(session))
+	} else {
+		tokenPair, user, err = h.authService.LoginOrRegisterOAuthWithTokenPairAndPromoCode(
+			c.Request.Context(),
+			email,
+			username,
+			req.InvitationCode,
+			req.AffCode,
+			pendingOAuthPromoCode(session),
+			"oidc",
+		)
+	}
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -1222,65 +1158,53 @@ func oidcClearCookie(c *gin.Context, name string, secure bool) {
 	})
 }
 
-// tryOIDCVerifiedEmailFastPath 在 OIDC 上游已返回已验证邮箱时尝试跳过 choice/pending 页。
-// 返回 true 表示已经写出重定向响应；返回 false 表示调用方应继续回退到常规 choice 流程。
-func (h *AuthHandler) tryOIDCVerifiedEmailFastPath(
+// completeOIDCAutoLogin provisions the account from the authenticated OIDC identity.
+// Only invitation-only deployments need a pending signup session.
+func (h *AuthHandler) completeOIDCAutoLogin(
 	c *gin.Context,
 	frontendCallback string,
 	redirectTo string,
 	identity service.PendingAuthIdentityKey,
-	compatEmail string,
+	email string,
 	username string,
 	upstreamClaims map[string]any,
-) bool {
-	if h == nil || h.authService == nil || h.settingSvc == nil {
-		return false
-	}
+	emailVerified bool,
+) {
 	ctx := c.Request.Context()
-	if h.isForceEmailOnThirdPartySignup(ctx) {
-		return false
-	}
-	if h.settingSvc.IsInvitationCodeEnabled(ctx) {
-		return false
-	}
 	if err := h.ensureBackendModeAllowsNewUserLogin(ctx); err != nil {
-		log.Printf("[OIDC OAuth] verified-email fast path blocked by backend mode: reason=%s", infraerrors.Reason(err))
 		clearOAuthPendingSessionCookie(c, isRequestHTTPS(c))
 		clearOAuthPendingBrowserCookie(c, isRequestHTTPS(c))
 		redirectOAuthError(c, frontendCallback, "login_blocked", infraerrors.Reason(err), infraerrors.Message(err))
-		return true
+		return
 	}
-
-	verifiedEmail := strings.TrimSpace(strings.ToLower(compatEmail))
-	upstreamMetadata := make(map[string]any, len(upstreamClaims)+1)
-	for k, v := range upstreamClaims {
-		upstreamMetadata[k] = v
-	}
-	if syntheticEmail := pendingSessionStringValue(upstreamClaims, "email"); syntheticEmail != "" && !strings.EqualFold(syntheticEmail, verifiedEmail) {
-		upstreamMetadata["synthetic_email"] = syntheticEmail
-	}
-	upstreamMetadata["email"] = verifiedEmail
 	input := service.EmailOAuthIdentityInput{
-		ProviderType:     strings.TrimSpace(identity.ProviderType),
-		ProviderKey:      strings.TrimSpace(identity.ProviderKey),
-		ProviderSubject:  strings.TrimSpace(identity.ProviderSubject),
-		Email:            verifiedEmail,
-		EmailVerified:    true,
-		Username:         strings.TrimSpace(username),
+		ProviderType: identity.ProviderType, ProviderKey: identity.ProviderKey, ProviderSubject: identity.ProviderSubject,
+		Email: email, EmailVerified: emailVerified, Username: username,
 		DisplayName:      pendingSessionStringValue(upstreamClaims, "suggested_display_name"),
 		AvatarURL:        pendingSessionStringValue(upstreamClaims, "suggested_avatar_url"),
-		UpstreamMetadata: upstreamMetadata,
+		UpstreamMetadata: upstreamClaims,
 	}
-	tokenPair, _, err := h.authService.LoginOrRegisterVerifiedEmailOAuthWithSignupCodes(
-		ctx,
-		input,
-		"",
-		"",
-		readOAuthPromoCode(c),
-	)
+	tokenPair, _, err := h.authService.LoginOrRegisterOIDCWithSignupCodes(ctx, input, "", "", readOAuthPromoCode(c))
+	if errors.Is(err, service.ErrOAuthInvitationRequired) {
+		browserSessionKey, _ := readOAuthPendingBrowserCookie(c)
+		upstreamClaims["oidc_auto_registration"] = true
+		if err := h.createOAuthPendingSession(c, oauthPendingSessionPayload{
+			Intent: oauthIntentLogin, Identity: identity, ResolvedEmail: email,
+			RedirectTo: redirectTo, BrowserSessionKey: browserSessionKey,
+			UpstreamIdentityClaims: upstreamClaims,
+			CompletionResponse:     map[string]any{"error": "invitation_required", "redirect": redirectTo},
+		}); err != nil {
+			redirectOAuthError(c, frontendCallback, "session_error", infraerrors.Reason(err), infraerrors.Message(err))
+			return
+		}
+		redirectToFrontendCallback(c, frontendCallback)
+		return
+	}
 	if err != nil {
-		log.Printf("[OIDC OAuth] verified-email fast path skipped: reason=%s", infraerrors.Reason(err))
-		return false
+		clearOAuthPendingSessionCookie(c, isRequestHTTPS(c))
+		clearOAuthPendingBrowserCookie(c, isRequestHTTPS(c))
+		redirectOAuthError(c, frontendCallback, "login_failed", infraerrors.Reason(err), infraerrors.Message(err))
+		return
 	}
 
 	fragment := url.Values{}
@@ -1292,5 +1216,4 @@ func (h *AuthHandler) tryOIDCVerifiedEmailFastPath(
 	clearOAuthPendingSessionCookie(c, isRequestHTTPS(c))
 	clearOAuthPendingBrowserCookie(c, isRequestHTTPS(c))
 	redirectWithFragment(c, frontendCallback, fragment)
-	return true
 }

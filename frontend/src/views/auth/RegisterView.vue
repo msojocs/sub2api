@@ -13,7 +13,7 @@
 
       <!-- Registration Disabled Message -->
       <div
-        v-if="!registrationEnabled && settingsLoaded"
+        v-if="(!registrationEnabled || !passwordRegistrationEnabled) && settingsLoaded"
         class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-800/50 dark:bg-amber-900/20"
       >
         <div class="flex items-start gap-3">
@@ -21,7 +21,7 @@
             <Icon name="exclamationCircle" size="md" class="text-amber-500" />
           </div>
           <p class="text-sm text-amber-700 dark:text-amber-400">
-            {{ t('auth.registrationDisabled') }}
+            {{ t(registrationEnabled ? 'auth.passwordRegistrationDisabled' : 'auth.registrationDisabled') }}
           </p>
         </div>
       </div>
@@ -421,6 +421,7 @@ const confirmPassword = ref('')
 
 // Public settings
 const registrationEnabled = ref<boolean>(true)
+const passwordRegistrationEnabled = ref<boolean>(true)
 const emailVerifyEnabled = ref<boolean>(false)
 // Public settings are injected into the app store before Vue mounts. Use that
 // value for the first render so a disabled promo-code field never flashes
@@ -564,6 +565,7 @@ onMounted(async () => {
   try {
     const settings = await getPublicSettings()
     registrationEnabled.value = settings.registration_enabled
+    passwordRegistrationEnabled.value = settings.password_registration_enabled !== false
     emailVerifyEnabled.value = settings.email_verify_enabled
     promoCodeEnabled.value = settings.promo_code_enabled
     invitationCodeEnabled.value = settings.invitation_code_enabled
@@ -994,6 +996,7 @@ function validateForm(): boolean {
 // ==================== Form Handlers ====================
 
 async function handleRegister(): Promise<void> {
+  if (!settingsLoaded.value || !registrationEnabled.value || !passwordRegistrationEnabled.value) return
   // Clear previous error
   errorMessage.value = ''
 

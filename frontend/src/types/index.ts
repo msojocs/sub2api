@@ -210,6 +210,7 @@ export interface LoginAgreementDocument {
 
 export interface PublicSettings {
   registration_enabled: boolean
+  password_registration_enabled: boolean
   email_verify_enabled: boolean
   force_email_on_third_party_signup: boolean
   registration_email_suffix_whitelist: string[]

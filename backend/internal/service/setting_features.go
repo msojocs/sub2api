@@ -24,6 +24,15 @@ func (s *SettingService) IsRegistrationEnabled(ctx context.Context) bool {
 	return value == "true"
 }
 
+// IsPasswordRegistrationEnabled controls local email/password signup independently of OAuth.
+func (s *SettingService) IsPasswordRegistrationEnabled(ctx context.Context) bool {
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyPasswordRegistrationEnabled)
+	if errors.Is(err, ErrSettingNotFound) {
+		return true
+	}
+	return err == nil && value != "false"
+}
+
 // IsEmailVerifyEnabled 检查是否开启邮件验证
 func (s *SettingService) IsEmailVerifyEnabled(ctx context.Context) bool {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyEmailVerifyEnabled)

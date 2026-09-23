@@ -151,6 +151,8 @@ export default {
         description: '控制用户注册和验证',
         enableRegistration: '开放注册',
         enableRegistrationHint: '允许新用户注册',
+        passwordRegistration: '允许使用密码注册',
+        passwordRegistrationHint: '关闭后禁止通过邮箱和密码注册新账户，第三方登录仍可自动创建账户；开放注册总开关仍然生效。',
         emailVerification: '邮箱验证',
         emailVerificationHint: '新用户注册时需要验证邮箱',
         emailSuffixWhitelist: '邮箱域名白名单',
