@@ -32,7 +32,12 @@ func (s *openaiOAuthClientRefreshStub) RefreshTokenWithClientID(ctx context.Cont
 	return nil, errors.New("not implemented")
 }
 
-func TestOpenAIOAuthService_RefreshAccountToken_NoRefreshTokenUsesExistingAccessToken(t *testing.T) {
+// 无 refresh_token 的凭据（access token 单凭据导入）没有"刷新"这一动作。
+// 这里必须直接失败，而不是拿存储的 access token 伪造一个 tokenInfo 结果、
+// 再去上游跑 accounts/check / subscription / training opt-out 补全：
+// access token 一旦被上游判废，那些请求会稳定返回 401 Invalid bearer token，
+// 整条流程被当成"刷新失败"上报，账号随后被 401 分支禁用。
+func TestOpenAIOAuthService_RefreshAccountToken_NoRefreshTokenFailsWithoutUpstreamRequests(t *testing.T) {
 	client := &openaiOAuthClientRefreshStub{}
 	svc := NewOpenAIOAuthService(nil, client)
 	var privacyClientCalls int32
@@ -54,12 +59,12 @@ func TestOpenAIOAuthService_RefreshAccountToken_NoRefreshTokenUsesExistingAccess
 	}
 
 	info, err := svc.RefreshAccountToken(context.Background(), account)
-	require.NoError(t, err)
-	require.NotNil(t, info)
-	require.Equal(t, "existing-access-token", info.AccessToken)
-	require.Equal(t, "client-id-1", info.ClientID)
-	require.Zero(t, atomic.LoadInt32(&client.refreshCalls), "existing access token should be reused without calling refresh")
-	require.Positive(t, atomic.LoadInt32(&privacyClientCalls), "existing access token should still run enrichment")
+	require.Error(t, err)
+	require.Nil(t, info)
+	require.Contains(t, err.Error(), "no refresh token available",
+		"isNonRetryableRefreshError 依赖该子串判定不可重试")
+	require.Zero(t, atomic.LoadInt32(&client.refreshCalls))
+	require.Zero(t, atomic.LoadInt32(&privacyClientCalls), "must not issue enrichment requests under the name of refresh")
 }
 
 func TestOpenAIOAuthService_RefreshAccountToken_PATIgnoresStaleRefreshToken(t *testing.T) {

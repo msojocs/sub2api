@@ -1345,6 +1345,27 @@ func (a *Account) IsOpenAIPersonalAccessToken() bool {
 		isOpenAIPersonalAccessTokenAuthMode(a.GetCredential(openAIAuthModeLegacyCredentialKey))
 }
 
+// IsOpenAIRefreshlessOAuthCredential 报告该 OpenAI OAuth 账号在设计上没有 OAuth 刷新
+// 生命周期：Codex accessToken-only 导入（session 不含 refresh_token）、Codex PAT(at-，
+// 凭据里的 refresh_token 已被 NormalizeOpenAIPersonalAccessTokenCredentials 清掉)、
+// Agent Identity（走 ed25519 + task 注册）。这类凭据只能靠替换 access token /
+// 重新导入来续期。
+//
+// 由此推出两条约束：
+//   - 刷新入口必须直接跳过它们（NeedsRefresh / GetAccessToken / RefreshAccountToken），
+//     不能向上游发任何"刷新/补全"请求；
+//   - 401 只能理解为"access token 被上游拒绝"，不能拿缺 refresh_token 当作凭据进入
+//     永久故障的理由，处理方式与 AutoPauseExpiredAccounts 对过期凭据的处理一致（停调）。
+func (a *Account) IsOpenAIRefreshlessOAuthCredential() bool {
+	if a == nil || !a.IsOpenAIOAuth() {
+		return false
+	}
+	if a.IsOpenAIPersonalAccessToken() {
+		return true
+	}
+	return strings.TrimSpace(a.GetCredential("refresh_token")) == ""
+}
+
 func (a *Account) IsOpenAIApiKey() bool {
 	return a.IsOpenAI() && a.Type == AccountTypeAPIKey
 }

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
@@ -101,10 +100,10 @@ func (r *OpenAITokenRefresher) CanRefresh(account *Account) bool {
 // NeedsRefresh 检查token是否需要刷新
 // expires_at 缺失且处于限流状态时需要刷新，防止限流期间 token 静默过期
 func (r *OpenAITokenRefresher) NeedsRefresh(account *Account, refreshWindow time.Duration) bool {
-	if account.IsOpenAIPersonalAccessToken() {
-		return false
-	}
-	if strings.TrimSpace(account.GetOpenAIRefreshToken()) == "" {
+	// Codex PAT 与无 refresh_token 的凭据（access token 单凭据导入、Agent Identity、
+	// 影子）都不存在"刷新"这一动作，直接跳过；否则刷新入口会在 access token 过期后
+	// 发起必然 401 的上游请求。
+	if account.IsOpenAIRefreshlessOAuthCredential() {
 		return false
 	}
 	expiresAt := account.GetCredentialAsTime("expires_at")

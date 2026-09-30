@@ -362,27 +362,17 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 
 	refreshToken := account.GetCredential("refresh_token")
 	if refreshToken == "" {
-		if accessToken != "" {
-			tokenInfo := &OpenAITokenInfo{
-				AccessToken:           accessToken,
-				RefreshToken:          "",
-				IDToken:               account.GetCredential("id_token"),
-				ClientID:              account.GetCredential("client_id"),
-				Email:                 account.GetCredential("email"),
-				ChatGPTAccountID:      account.GetCredential("chatgpt_account_id"),
-				ChatGPTUserID:         account.GetCredential("chatgpt_user_id"),
-				OrganizationID:        account.GetCredential("organization_id"),
-				PlanType:              account.GetCredential("plan_type"),
-				SubscriptionExpiresAt: account.GetCredential("subscription_expires_at"),
-			}
-			if expiresAt := account.GetCredentialAsTime("expires_at"); expiresAt != nil {
-				tokenInfo.ExpiresAt = expiresAt.Unix()
-				tokenInfo.ExpiresIn = int64(time.Until(*expiresAt).Seconds())
-			}
-			s.enrichTokenInfo(ctx, tokenInfo, proxyURL)
-			return tokenInfo, nil
-		}
-		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_NO_REFRESH_TOKEN", "no refresh token available")
+		// access token 单凭据（Codex accessToken-only 导入 / Agent Identity）在设计中就不带
+		// refresh_token，只能用新的 access token 覆盖来续期。这里必须直接失败：
+		// 旧实现会拿存储的 access token 造一个 tokenInfo 再走 enrichTokenInfo，
+		// 那是以上游 accounts/check、subscription 等请求"冒充刷新"，access token 一旦被
+		// 上游判废就会稳定报 401 Invalid bearer token，把刷新流程炸成"刷新失败"。
+		// 调用方（NeedsRefresh / GetAccessToken）已在此之前短路，走到这里说明是误调。
+		return nil, infraerrors.New(
+			http.StatusBadRequest,
+			"OPENAI_OAUTH_NO_REFRESH_TOKEN",
+			"no refresh token available: this credential can only be renewed by replacing the access token",
+		)
 	}
 
 	clientID := account.GetCredential("client_id")

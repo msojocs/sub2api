@@ -931,7 +931,9 @@ func TestOpenAITokenProvider_RuntimeMetrics_LockAcquireFailure(t *testing.T) {
 	require.GreaterOrEqual(t, metrics.RefreshRequests, int64(1))
 }
 
-func TestOpenAITokenProvider_NoRefreshTokenExpired_DisablesAccount(t *testing.T) {
+// 无 refresh_token 的凭据（access token 单凭据导入）过期后必须停调而不是永久禁用：
+// 缺 refresh_token 是这类凭据的设计，用户重新导入 access token 后应能恢复。
+func TestOpenAITokenProvider_NoRefreshTokenExpired_PausesScheduling(t *testing.T) {
 	cache := newOpenAITokenCacheStub()
 	repo := &rateLimitAccountRepoStub{}
 
@@ -960,8 +962,11 @@ func TestOpenAITokenProvider_NoRefreshTokenExpired_DisablesAccount(t *testing.T)
 	require.Empty(t, token)
 	require.Contains(t, err.Error(), "refresh_token is missing")
 
-	require.Equal(t, 1, repo.setErrorCalls, "account should be disabled via SetError exactly once")
-	require.Contains(t, repo.lastErrorMsg, "refresh_token is missing")
+	require.Equal(t, 0, repo.setErrorCalls, "refresh-less credential must not be permanently disabled")
+	require.Equal(t, 1, repo.schedulableCalls, "account should be paused exactly once")
+	require.Equal(t, account.ID, repo.lastSchedulableID)
+	require.False(t, repo.lastSchedulable)
+	require.NotContains(t, cache.tokens, cacheKey, "stale cached token should be evicted")
 	require.Len(t, blocker.accounts, 1)
 	require.Equal(t, account.ID, blocker.accounts[0].ID)
 	require.Equal(t, "missing_refresh_token", blocker.reasons[0])

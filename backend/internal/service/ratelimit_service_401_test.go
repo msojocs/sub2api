@@ -20,6 +20,7 @@ type rateLimitAccountRepoStub struct {
 	rateLimitedCalls       int
 	updateCredentialsCalls int
 	updateExtraCalls       int
+	schedulableCalls       int
 	lastCredentials        map[string]any
 	lastExtraUpdates       map[string]any
 	lastErrorMsg           string
@@ -28,7 +29,16 @@ type rateLimitAccountRepoStub struct {
 	lastTempID             int64
 	lastRateLimitedID      int64
 	lastRateLimitedAt      time.Time
+	lastSchedulableID      int64
+	lastSchedulable        bool
 	tempErr                error
+}
+
+func (r *rateLimitAccountRepoStub) SetSchedulable(ctx context.Context, id int64, schedulable bool) error {
+	r.schedulableCalls++
+	r.lastSchedulableID = id
+	r.lastSchedulable = schedulable
+	return nil
 }
 
 func (r *rateLimitAccountRepoStub) SetError(ctx context.Context, id int64, errorMsg string) error {
@@ -296,9 +306,10 @@ func TestRateLimitService_HandleUpstreamError_OAuth401DoesNotOverwriteCredential
 	require.Nil(t, repo.lastCredentials, "no credentials should have been persisted")
 }
 
-// 缺少 refresh_token 的 OAuth 账号 401 应直接 SetError 永久禁用，
-// 不再走 10 分钟冷却（冷却期内无人能刷新它，结束后还会被选中再 502 一次）。
-func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t *testing.T) {
+// 缺少 refresh_token 的 OpenAI OAuth 凭据（access token 单凭据导入、Codex PAT）
+// 401 时应停调（schedulable=false，status 保持 active），而不是 SetError 永久禁用：
+// 缺 refresh_token 是这类凭据的设计，不是凭据损坏，用户重新导入 access token 后应能恢复。
+func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenPausesScheduling(t *testing.T) {
 	t.Run("openai_no_refresh_token", func(t *testing.T) {
 		repo := &rateLimitAccountRepoStub{}
 		invalidator := &tokenCacheInvalidatorRecorder{}
@@ -308,6 +319,7 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 			ID:       2881,
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
+			Status:   StatusActive,
 			Credentials: map[string]any{
 				"access_token": "expired-at",
 				// no refresh_token
@@ -317,10 +329,12 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 		require.True(t, shouldDisable)
-		require.Equal(t, 1, repo.setErrorCalls, "AT-only OAuth 401 must SetError")
-		require.Equal(t, 0, repo.tempCalls, "AT-only OAuth 401 must NOT temp-unschedule")
+		require.Equal(t, 0, repo.setErrorCalls, "refresh-less credential must not be permanently disabled")
+		require.Equal(t, 0, repo.tempCalls, "no point in a cooldown that nothing can recover")
+		require.Equal(t, 1, repo.schedulableCalls, "account must be paused via schedulable=false")
+		require.Equal(t, int64(2881), repo.lastSchedulableID)
+		require.False(t, repo.lastSchedulable)
 		require.Equal(t, 0, repo.updateCredentialsCalls, "no point forcing expires_at when refresh is impossible")
-		require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
 		require.Len(t, invalidator.accounts, 1, "cache should still be invalidated")
 	})
 
@@ -340,30 +354,79 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 		require.True(t, shouldDisable)
-		require.Equal(t, 1, repo.setErrorCalls)
+		require.Equal(t, 0, repo.setErrorCalls)
 		require.Equal(t, 0, repo.tempCalls)
+		require.Equal(t, 1, repo.schedulableCalls)
 	})
 
-	t.Run("antigravity_no_refresh_token_sets_error", func(t *testing.T) {
+	// Codex PAT(at-) 同样没有 refresh_token，也走停调分支而不是永久禁用。
+	t.Run("openai_personal_access_token_pauses_scheduling", func(t *testing.T) {
 		repo := &rateLimitAccountRepoStub{}
-		invalidator := &tokenCacheInvalidatorRecorder{}
 		service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
-		service.SetTokenCacheInvalidator(invalidator)
 		account := &Account{
-			ID:       2883,
-			Platform: PlatformAntigravity,
+			ID:       2884,
+			Platform: PlatformOpenAI,
 			Type:     AccountTypeOAuth,
 			Credentials: map[string]any{
-				"access_token": "expired-at",
+				"access_token": "at-xxxx",
+				"auth_mode":    OpenAIAuthModePersonalAccessToken,
 			},
 		}
 
 		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
 		require.True(t, shouldDisable)
-		require.Equal(t, 1, repo.setErrorCalls, "Antigravity OAuth without refresh_token cannot self-recover")
-		require.Equal(t, 0, repo.tempCalls)
-		require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
-		require.Len(t, invalidator.accounts, 1)
+		require.Equal(t, 0, repo.setErrorCalls)
+		require.Equal(t, 1, repo.schedulableCalls)
+		require.False(t, repo.lastSchedulable)
 	})
+
+	// Agent Identity 的 401 可能是 task 级的，有专门的任务恢复流程，
+	// 不能在这里改动任何调度状态。
+	t.Run("openai_agent_identity_leaves_account_untouched", func(t *testing.T) {
+		repo := &rateLimitAccountRepoStub{}
+		service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+		account := &Account{
+			ID:       2885,
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeOAuth,
+			Credentials: map[string]any{
+				"access_token": "agent-token",
+				"auth_mode":    OpenAIAuthModeAgentIdentity,
+			},
+		}
+
+		shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
+
+		require.True(t, shouldDisable)
+		require.Equal(t, 0, repo.setErrorCalls)
+		require.Equal(t, 0, repo.tempCalls)
+		require.Equal(t, 0, repo.schedulableCalls)
+	})
+}
+
+// 非 OpenAI 平台缺少 refresh_token 的 OAuth 账号仍走 SetError 永久禁用：
+// 那些平台的凭据模型里 refresh_token 是必备字段，缺失意味着凭据确实坏了。
+func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenNonOpenAISetsError(t *testing.T) {
+	repo := &rateLimitAccountRepoStub{}
+	invalidator := &tokenCacheInvalidatorRecorder{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	service.SetTokenCacheInvalidator(invalidator)
+	account := &Account{
+		ID:       2883,
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "expired-at",
+		},
+	}
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 1, repo.setErrorCalls, "Antigravity OAuth without refresh_token cannot self-recover")
+	require.Equal(t, 0, repo.tempCalls)
+	require.Equal(t, 0, repo.schedulableCalls)
+	require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
+	require.Len(t, invalidator.accounts, 1)
 }

@@ -156,16 +156,18 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 
 	// 2) Refresh if needed (pre-expiry skew).
 	expiresAt := account.GetCredentialAsTime("expires_at")
-	needsRefresh := !account.IsOpenAIPersonalAccessToken() && (expiresAt == nil || time.Until(*expiresAt) <= openAITokenRefreshSkew)
-	if needsRefresh && strings.TrimSpace(account.GetOpenAIRefreshToken()) == "" {
-		if expiresAt != nil && !time.Now().Before(*expiresAt) {
-			const reason = "openai access_token expired and refresh_token is missing"
-			// 永久故障：缺失 refresh_token 时账号无法自愈，必须立即从调度池剔除，
-			// 否则会被反复选中、每次都在 token 阶段直接返回错误，对用户呈现持续 502。
-			p.disableAccountMissingRefreshToken(account, reason)
-			return "", errors.New(reason)
-		}
-		needsRefresh = false
+	// Codex PAT 与无 refresh_token 的凭据（access token 单凭据导入等）都没有"刷新"这一动作，
+	// 必须完全跳过刷新入口，不能以上游请求冒充刷新。
+	refreshlessCredential := account.IsOpenAIRefreshlessOAuthCredential()
+	needsRefresh := !refreshlessCredential && (expiresAt == nil || time.Until(*expiresAt) <= openAITokenRefreshSkew)
+	if refreshlessCredential && expiresAt != nil && !time.Now().Before(*expiresAt) {
+		// access token 已过期，而该凭据在设计上没有 refresh_token，无法自愈：
+		// access token 只能由用户重新导入/覆盖来续期（与导入时强制的
+		// auto_pause_on_expired 语义一致）。这里停掉调度，避免账号被反复选中、
+		// 每次都在 token 阶段失败，对用户呈现持续 502。
+		const reason = "openai access_token expired and refresh_token is missing"
+		p.pauseAccountRefreshlessCredential(account, reason)
+		return "", errors.New(reason)
 	}
 	refreshFailed := false
 
@@ -270,13 +272,19 @@ func (p *OpenAITokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	return accessToken, nil
 }
 
-// disableAccountMissingRefreshToken 在请求路径上发现 OpenAI OAuth 账号
-// 凭证已过期且 refresh_token 缺失时，将账号标记为 error 状态。
-// 这是一种永久性故障：仅靠后续请求或 TokenRefreshService 不会自愈
-// （NeedsRefresh 也会因 refresh_token 为空直接跳过），
-// 必须主动剔除以避免账号被持续选中导致用户端反复 502。
+// pauseAccountRefreshlessCredential 在请求路径上发现 OpenAI OAuth 账号
+// 凭据已过期且设计上就没有 refresh_token（access token 单凭据导入等）时，
+// 停止该账号的调度。
+//
+// 这里刻意使用 schedulable=false 而不是 SetError：缺少 refresh_token 不是凭据损坏，
+// 账号本身仍然可用，只是 access token 需要用户重新导入。保持 status=active
+// 与产品既有的 auto_pause_on_expired（AutoPauseExpiredAccounts，同样是
+// schedulable=FALSE）语义一致，用户续期后能直接恢复调度，
+// 不会被"永久禁用"卡住。停调同时避免了账号被反复选中、每次都在 token 阶段
+// 失败导致用户端持续 502。
+//
 // 使用 background context 是因为请求 context 可能很快结束。
-func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(account *Account, reason string) {
+func (p *OpenAITokenProvider) pauseAccountRefreshlessCredential(account *Account, reason string) {
 	if p == nil || p.accountRepo == nil || account == nil {
 		return
 	}
@@ -284,8 +292,8 @@ func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(account *Account
 		p.runtimeBlocker.BlockAccountScheduling(account, time.Time{}, "missing_refresh_token")
 	}
 	bgCtx := context.Background()
-	if err := p.accountRepo.SetError(bgCtx, account.ID, reason); err != nil {
-		slog.Warn("openai_token_provider.set_error_failed",
+	if err := p.accountRepo.SetSchedulable(bgCtx, account.ID, false); err != nil {
+		slog.Warn("openai_token_provider.pause_scheduling_failed",
 			"account_id", account.ID,
 			"error", err,
 		)
@@ -300,7 +308,7 @@ func (p *OpenAITokenProvider) disableAccountMissingRefreshToken(account *Account
 			)
 		}
 	}
-	slog.Warn("openai_token_provider.account_disabled_missing_refresh_token",
+	slog.Warn("openai_token_provider.account_paused_refreshless_credential",
 		"account_id", account.ID,
 		"reason", reason,
 	)

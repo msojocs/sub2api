@@ -457,8 +457,38 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 					slog.Warn("oauth_401_invalidate_cache_failed", "account_id", authAccount.ID, "error", err)
 				}
 			}
-			// 缺少 refresh_token 的 OAuth 账号无法在冷却期内自愈（后台刷新服务也会跳过），
-			// 直接走 SetError 永久禁用，避免冷却结束后再被选中产生一发无意义的 502。
+			// 无 refresh_token 的 OpenAI OAuth 凭据（access token 单凭据导入、Codex PAT）
+			// 在设计上就没有"刷新"这个动作（NeedsRefresh 直接跳过，刷新入口也不会再
+			// 向上游发请求），因此 401 只能说明当前 access token 被上游拒绝，
+			// 而不是凭据损坏——不能拿"缺 refresh_token"当作永久故障的理由。
+			// 旧实现走 SetError 永久禁用并上报 "OAuth 401 (no refresh_token): ..."，
+			// 这类账号在用户重新导入前一直不可用。改为停调（schedulable=false，
+			// status 保持 active），与导入时强制的 auto_pause_on_expired /
+			// AutoPauseExpiredAccounts 语义一致，用户续期后即可恢复。
+			// Agent Identity 例外：其 401 可能是 task 级的，有专门的任务恢复流程
+			// （见 handleCodexModelsManifestAccountAuthError），不在这里改调度状态。
+			if authAccount.Platform == PlatformOpenAI && authAccount.IsOpenAIAgentIdentity() {
+				slog.Warn("openai_agent_identity_401_leaves_scheduling_untouched", "account_id", authAccount.ID)
+				shouldDisable = true
+				break
+			}
+			if authAccount.Platform == PlatformOpenAI && authAccount.IsOpenAIRefreshlessOAuthCredential() {
+				msg := "Authentication failed (401): access_token rejected and refresh_token missing, cannot refresh"
+				if upstreamMsg != "" {
+					msg = "OAuth 401: " + upstreamMsg
+				}
+				s.notifyAccountSchedulingBlocked(authAccount, time.Time{}, "openai_refreshless_credential")
+				if err := s.accountRepo.SetSchedulable(ctx, authAccount.ID, false); err != nil {
+					slog.Warn("openai_refreshless_credential_pause_failed", "account_id", authAccount.ID, "error", err)
+				} else {
+					slog.Warn("openai_refreshless_credential_paused", "account_id", authAccount.ID, "reason", msg)
+				}
+				shouldDisable = true
+				break
+			}
+			// 其他平台缺少 refresh_token 的 OAuth 账号无法在冷却期内自愈
+			// （后台刷新服务也会跳过），直接走 SetError 永久禁用，
+			// 避免冷却结束后再被选中产生一发无意义的 502。
 			if strings.TrimSpace(authAccount.GetCredential("refresh_token")) == "" {
 				msg := "Authentication failed (401): refresh_token missing, cannot recover"
 				if upstreamMsg != "" {
