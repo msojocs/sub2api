@@ -473,15 +473,19 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 				break
 			}
 			if authAccount.Platform == PlatformOpenAI && authAccount.IsOpenAIRefreshlessOAuthCredential() {
-				msg := "Authentication failed (401): access_token rejected and refresh_token missing, cannot refresh"
-				if upstreamMsg != "" {
-					msg = "OAuth 401: " + upstreamMsg
+				endpoint := upstreamEndpointLabel(ctx)
+				detail := strings.TrimSpace(upstreamMsg)
+				if detail == "" {
+					detail = "no upstream message"
 				}
+				// 事件名放在最前面，便于 grep；端点与上游报文直接写进消息体，
+				// 因为日志面板只稳定展示消息文本。
+				msg := fmt.Sprintf("openai_refreshless_credential_paused endpoint=%s status=401 upstream_msg=%s", endpoint, detail)
 				s.notifyAccountSchedulingBlocked(authAccount, time.Time{}, "openai_refreshless_credential")
 				if err := s.accountRepo.SetSchedulable(ctx, authAccount.ID, false); err != nil {
-					slog.Warn("openai_refreshless_credential_pause_failed", "account_id", authAccount.ID, "error", err)
+					slog.Warn(msg, "account_id", authAccount.ID, "upstream_endpoint", endpoint, "upstream_status", 401, "upstream_message", detail, "error", err)
 				} else {
-					slog.Warn("openai_refreshless_credential_paused", "account_id", authAccount.ID, "reason", msg)
+					slog.Warn(msg, "account_id", authAccount.ID, "upstream_endpoint", endpoint, "upstream_status", 401, "upstream_message", detail)
 				}
 				shouldDisable = true
 				break
@@ -492,7 +496,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 			if strings.TrimSpace(authAccount.GetCredential("refresh_token")) == "" {
 				msg := "Authentication failed (401): refresh_token missing, cannot recover"
 				if upstreamMsg != "" {
-					msg = "OAuth 401 (no refresh_token): " + upstreamMsg
+					msg = "OAuth 401 (no refresh_token) @ " + upstreamEndpointLabel(ctx) + ": " + upstreamMsg
 				}
 				s.handleAuthError(ctx, authAccount, msg)
 				shouldDisable = true

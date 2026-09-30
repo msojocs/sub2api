@@ -3,8 +3,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -403,6 +405,65 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenPausesSchedu
 		require.Equal(t, 0, repo.tempCalls)
 		require.Equal(t, 0, repo.schedulableCalls)
 	})
+}
+
+// 排障要求：日志面板只稳定展示 slog 的消息文本，所以"是哪个上游端点回的 401"
+// 必须写进消息体本身——同一个账号在 /responses、/models 等端点上的鉴权口径不同，
+// 缺了端点就无法判断 401 是不是真的针对本次转发请求。
+func TestRateLimitService_HandleUpstreamError_OAuth401RefreshlessLogsUpstreamEndpoint(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       2886,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"access_token": "at-without-refresh",
+			// no refresh_token
+		},
+	}
+	ctx := withUpstreamEndpoint(context.Background(), "chatgpt.com/backend-api/codex/responses")
+
+	shouldDisable := service.HandleUpstreamError(ctx, account, 401, http.Header{}, []byte(`{"error":{"message":"Invalid bearer token"}}`))
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 1, repo.schedulableCalls)
+
+	output := logs.String()
+	require.Contains(t, output, "openai_refreshless_credential_paused")
+	require.Contains(t, output, "endpoint=chatgpt.com/backend-api/codex/responses")
+	require.Contains(t, output, "status=401")
+	require.Contains(t, output, "Invalid bearer token", "upstream message must stay in the log line")
+}
+
+// 没有端点上下文时（例如尚未接入 endpoint 埋点的调用点）降级为 unknown_endpoint，
+// 不能因为缺信息就不打这条日志——停调事实本身仍然必须可见。
+func TestRateLimitService_HandleUpstreamError_OAuth401RefreshlessLogsUnknownEndpoint(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previousLogger)
+
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	account := &Account{
+		ID:       2887,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "at-without-refresh",
+		},
+	}
+
+	service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
+
+	require.Contains(t, logs.String(), "endpoint=unknown_endpoint")
 }
 
 // 非 OpenAI 平台缺少 refresh_token 的 OAuth 账号仍走 SetError 永久禁用：

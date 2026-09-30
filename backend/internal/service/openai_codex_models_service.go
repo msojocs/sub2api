@@ -1839,7 +1839,12 @@ func (s *OpenAIGatewayService) handleCodexModelsManifestAccountAuthError(ctx con
 	if headers == nil {
 		headers = http.Header{}
 	}
-	s.handleOpenAIAccountUpstreamError(ctx, account, upstreamErr.statusCode, headers, upstreamErr.body)
+	// 模型清单端点没有 *http.Response，用常量补上端点标签：这条 401 同样可能
+	// 触发账号停调，日志里要能区分它和 /responses 的 401。
+	s.handleOpenAIAccountUpstreamError(
+		withUpstreamEndpoint(ctx, upstreamEndpointOfURL(chatgptCodexModelsURL)),
+		account, upstreamErr.statusCode, headers, upstreamErr.body,
+	)
 }
 
 func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, request openAIModelsRequest, fetch func(ctx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error), ifNoneMatch string) (*OpenAIModelsResponse, error) {

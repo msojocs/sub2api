@@ -990,7 +990,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 	if len(requestedModel) > 0 {
 		modelForCooldown = strings.TrimSpace(requestedModel[0])
 	}
-	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, modelForCooldown)
+	shouldDisable := s.handleOpenAIAccountUpstreamError(withUpstreamEndpoint(ctx, upstreamEndpointOf(resp)), account, resp.StatusCode, resp.Header, body, modelForCooldown)
 	failoverErr := s.newOpenAIAccountFailoverError(
 		account,
 		resp.StatusCode,
@@ -2099,7 +2099,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthResponseError(
 			return err
 		}
 		responseBody := []byte(fmt.Sprintf(`{"error":{"type":"upstream_error","code":%q,"message":%q}}`, code, message))
-		shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, statusCode, headers, responseBody, requestedModel)
+		shouldDisable := s.handleOpenAIAccountUpstreamError(withUpstreamEndpoint(ctx, upstreamEndpointOf(resp)), account, statusCode, headers, responseBody, requestedModel)
 		return s.newOpenAIAccountFailoverError(
 			account,
 			statusCode,
@@ -2172,7 +2172,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthResponseError(
 	if !retryable || responseWritten {
 		return err
 	}
-	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, upstreamErr.StatusCode, headers, responseBody, requestedModel)
+	shouldDisable := s.handleOpenAIAccountUpstreamError(withUpstreamEndpoint(ctx, upstreamEndpointOf(resp)), account, upstreamErr.StatusCode, headers, responseBody, requestedModel)
 	return s.newOpenAIAccountFailoverError(
 		account,
 		upstreamErr.StatusCode,
